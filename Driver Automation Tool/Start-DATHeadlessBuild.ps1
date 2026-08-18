@@ -55,7 +55,8 @@ function Send-DATHeadlessPreflightFailure {
             -TotalModels $preflightModels.Count -SuccessCount 0 -FailedCount 0 `
             -NotProcessedCount $preflightModels.Count `
             -CustomText ([string]$config.TeamsCustomText) `
-            -Platform $config.Platform -PackageType $config.PackageType -Models $preflightModels -Outcome 'Failed'
+            -Platform $config.Platform -PackageType $config.PackageType -Models $preflightModels -Outcome 'Failed' `
+            -FailureReason $Reason
         Write-DATLogEntry -Value "[Teams] Pre-flight failure notification sent -- $Reason" -Severity 1
     } catch {
         Write-DATLogEntry -Value "[Teams] Failed to send pre-flight failure notification: $($_.Exception.Message)" -Severity 2

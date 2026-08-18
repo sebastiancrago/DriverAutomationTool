@@ -5487,7 +5487,11 @@ function Send-DATTeamsNotification {
         # When supplied the model list shows each outcome instead of a flat selected-models list.
         # An entry may also carry PackageType (Drivers/BIOS) -- a model the build processed
         # contributes one row per package type in scope; leaving it off keeps a single row.
-        [array]$ModelStatuses = @()
+        [array]$ModelStatuses = @(),
+        # Optional explanation for a build that failed before it could report per-model results,
+        # so an unattended run says why it stopped instead of only that it did. Empty = no fact.
+        [AllowEmptyString()]
+        [string]$FailureReason = ''
     )
 
     # 'Auto' derives the state from FailedCount as before, so existing callers are unaffected.
@@ -5545,6 +5549,9 @@ function Send-DATTeamsNotification {
     $summaryFacts += @{ title = 'Failed'; value = "$FailedCount" }
     if ($NotProcessedCount -gt 0) {
         $summaryFacts += @{ title = 'Not Processed'; value = "$NotProcessedCount" }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($FailureReason)) {
+        $summaryFacts += @{ title = 'Failure Reason'; value = $FailureReason }
     }
     $summaryFacts += @{ title = 'Host';          value = $hostname }
     $summaryFacts += @{ title = $timestampLabel; value = $timestamp }
