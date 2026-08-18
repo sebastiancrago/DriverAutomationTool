@@ -5353,10 +5353,36 @@ function Start-DATModelProcessing {
             # card distinguishes genuinely UPDATED models from ones SKIPPED because already current
             # (a check-only run previously read as "everything updated" -- issue #842). A model that
             # produced at least one package (not in the skipped/failed sets, and reached) is Updated.
+            # Both lists hold one entry per package type, so the skipped set is kept per package type
+            # rather than flattened -- a model is only up to date when nothing in its scope was left
+            # to build.
             $skippedKeys = @{}
-            foreach ($s in $buildSkipped)  { if ($s.OEM -and $s.Model) { $skippedKeys["$($s.OEM)|$($s.Model)"] = $true } }
+            foreach ($s in $buildSkipped)  {
+                if ($s.OEM -and $s.Model) {
+                    $sKey = "$($s.OEM)|$($s.Model)"
+                    if (-not $skippedKeys.ContainsKey($sKey)) { $skippedKeys[$sKey] = @{} }
+                    if ($s.PackageType) { $skippedKeys[$sKey]["$($s.PackageType)"] = $true }
+                }
+            }
             $failedKeys  = @{}
             foreach ($f in $buildFailures) { if ($f.OEM -and $f.Model) { $failedKeys["$($f.OEM)|$($f.Model)"]  = $true } }
+
+            # Package types in scope per model, mirroring the per-model narrowing applied during
+            # processing. Microsoft Surface BIOS ships via driver injection, so no BIOS package is
+            # ever owed for those models and BIOS is left out of their scope.
+            $scopeKeys = @{}
+            foreach ($m in $modelList) {
+                $mScopeName = if ($m.Model) { $m.Model } else { 'Unknown' }
+                $mScopeKey  = "$($m.OEM)|$mScopeName"
+                $mScopeType = $effectivePackageType
+                if ($effectivePackageType -eq 'All' -and -not [string]::IsNullOrEmpty($m.PackageType)) {
+                    $mRequested = if ($isPilotBuild) { ($m.PackageType -replace '\s+Pilot$', '').Trim() } else { [string]$m.PackageType }
+                    if ($mRequested -in @('Drivers', 'BIOS', 'All')) { $mScopeType = $mRequested }
+                }
+                if (-not $scopeKeys.ContainsKey($mScopeKey)) { $scopeKeys[$mScopeKey] = @{} }
+                if ($mScopeType -in @('Drivers', 'All')) { $scopeKeys[$mScopeKey]['Drivers'] = $true }
+                if ($mScopeType -in @('BIOS', 'All') -and $m.OEM -ne 'Microsoft') { $scopeKeys[$mScopeKey]['BIOS'] = $true }
+            }
 
             $modelStatuses = @()
             $updatedCount = 0; $skippedModelCount = 0
@@ -5370,7 +5396,19 @@ function Start-DATModelProcessing {
                 } elseif ($failedKeys.ContainsKey($mKey) -and -not $skippedKeys.ContainsKey($mKey)) {
                     $status = 'Failed'
                 } elseif ($skippedKeys.ContainsKey($mKey) -and -not $failedKeys.ContainsKey($mKey)) {
-                    $status = 'Skipped (up to date)'; $skippedModelCount++
+                    # Up to date only when every package type in scope was already current. Drivers
+                    # current while BIOS updated leaves BIOS out of the skipped set, so that model is
+                    # genuinely Updated -- flattening the key reported it as "Skipped (up to date)"
+                    # and hid the BIOS update entirely.
+                    $mSkippedAll = $true
+                    foreach ($mScoped in $scopeKeys[$mKey].Keys) {
+                        if (-not $skippedKeys[$mKey].ContainsKey($mScoped)) { $mSkippedAll = $false }
+                    }
+                    if ($mSkippedAll) {
+                        $status = 'Skipped (up to date)'; $skippedModelCount++
+                    } else {
+                        $status = 'Updated'; $updatedCount++
+                    }
                 } elseif ($failedKeys.ContainsKey($mKey) -and $skippedKeys.ContainsKey($mKey)) {
                     # Mixed result across package types (e.g. drivers failed, BIOS current).
                     $status = 'Partial'; $updatedCount++
