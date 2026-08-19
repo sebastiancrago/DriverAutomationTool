@@ -5436,6 +5436,17 @@ function Start-DATModelProcessing {
                 if ($mScopeType -in @('BIOS', 'All') -and $m.OEM -ne 'Microsoft') { $scopeKeys[$mScopeKey]['BIOS'] = $true }
             }
 
+
+            # Index the version transitions recorded during processing so a row can say what a
+            # package moved from and to. Keyed per package type -- a model on an 'All' build
+            # contributes one record for each.
+            $versionKeys = @{}
+            foreach ($v in $buildVersions) {
+                if ($v.OEM -and $v.Model -and $v.PackageType) {
+                    $versionKeys["$($v.OEM)|$($v.Model)|$($v.PackageType)"] = $v
+                }
+            }
+
             $modelStatuses = @()
             $updatedCount = 0; $skippedModelCount = 0; $failedModelCount = 0
             for ($mi = 0; $mi -lt $modelList.Count; $mi++) {
@@ -5443,6 +5454,24 @@ function Start-DATModelProcessing {
                 $mOem   = $mEntry.OEM
                 $mName  = if ($mEntry.Model) { $mEntry.Model } else { 'Unknown' }
                 $mKey   = "$mOem|$mName"
+                # Transitions for the packages this model actually moved. A skipped package sits on
+                # the same version either side and a failed one never reached its target, so neither
+                # has a transition worth printing -- leaving them off also keeps a large check-only
+                # or failed build exactly the size it was.
+                $mVersions = @{}
+                foreach ($mVerType in @('Drivers', 'BIOS')) {
+                    $mVerRec = $versionKeys["$mKey|$mVerType"]
+                    if (-not $mVerRec -or $mVerRec.Outcome -ne 'Updated') { continue }
+                    # OEM catalogs mix dotted versions, dates and bare numbers, so a side is only
+                    # ever shown or left out -- never parsed, ordered or compared as a number. With
+                    # one side missing the other prints alone rather than as a dangling arrow.
+                    $mVerFrom = "$($mVerRec.FromVersion)"
+                    $mVerTo   = "$($mVerRec.ToVersion)"
+                    $mVerText = if ($mVerFrom -and $mVerTo -and $mVerFrom -ne $mVerTo) { "$mVerFrom -> $mVerTo" }
+                                elseif ($mVerTo) { $mVerTo }
+                                else { $mVerFrom }
+                    if ($mVerText) { $mVersions[$mVerType] = $mVerText }
+                }
                 if ($mi -ge $attemptedCount) {
                     $status = 'Not Processed'
                 } elseif ($failedKeys.ContainsKey($mKey)) {
@@ -5484,14 +5513,14 @@ function Start-DATModelProcessing {
                         $mPkgStatus = if ($mFailedPkgs.ContainsKey($mScoped)) { 'Failed' }
                                       elseif ($mSkippedPkgs.ContainsKey($mScoped)) { 'Up to date' }
                                       else { 'Updated' }
-                        $mRows += @{ OEM = $mOem; Model = $mName; Status = $mPkgStatus; PackageType = $mScoped }
+                        $mRows += @{ OEM = $mOem; Model = $mName; Status = $mPkgStatus; PackageType = $mScoped; Versions = $mVersions[$mScoped] }
                     }
                 }
                 if ($mRows.Count -gt 0) {
                     $modelStatuses += $mRows
                 } else {
                     # Reached only by a model the build never got to, or one with no package type
-                    # in scope (Microsoft on a BIOS build).
+                    # in scope (Microsoft on a BIOS build) -- neither has a version transition.
                     $modelStatuses += @{ OEM = $mOem; Model = $mName; Status = $status }
                 }
             }
@@ -5570,6 +5599,8 @@ function Send-DATTeamsNotification {
         # Processed). When supplied the model list shows each outcome instead of a flat model list.
         # An entry may also carry PackageType (Drivers/BIOS) -- a model the build processed
         # contributes one row per package type in scope; leaving it off keeps a single row.
+        # It may also carry Versions -- the transition text for whatever that row covers, already
+        # formatted, appended after the outcome. Absent or empty renders the outcome alone.
         [array]$ModelStatuses = @(),
         # Optional explanation for a build that failed before it could report per-model results,
         # so an unattended run says why it stopped instead of only that it did. Empty = no fact.
@@ -5655,6 +5686,10 @@ function Send-DATTeamsNotification {
             # PackageType is set on every row for a model the build actually processed -- rows
             # without it are models it never reached, carrying the model outcome on its own.
             if ($ms.PackageType) { $msStatus = "$($ms.PackageType): $msStatus" }
+            # Versions is set only for packages that actually moved, and already carries whatever
+            # the catalog gave -- a single version where one side is unknown, nothing at all where
+            # neither is, so a row never shows a dangling arrow.
+            if ($ms.Versions) { $msStatus = "$msStatus ($($ms.Versions))" }
             $modelFacts += @{ title = $ms.OEM; value = "$msModel - $msStatus" }
         }
     } else {
