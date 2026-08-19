@@ -5346,7 +5346,6 @@ function Start-DATModelProcessing {
             $script:TeamsBuildNotificationSent = $true
             # Count against what was attempted -- unreached models are not failures.
             $attemptedCount    = [Math]::Min($currentIndex, $totalModels)
-            $failedCount       = [Math]::Max(0, $attemptedCount - $completedCount)
             $notProcessedCount = [Math]::Max(0, $totalModels - $attemptedCount)
 
             # Derive an accurate per-model outcome from the unambiguous skipped/failed lists so the
@@ -5393,7 +5392,7 @@ function Start-DATModelProcessing {
             }
 
             $modelStatuses = @()
-            $updatedCount = 0; $skippedModelCount = 0
+            $updatedCount = 0; $skippedModelCount = 0; $failedModelCount = 0
             for ($mi = 0; $mi -lt $modelList.Count; $mi++) {
                 $mEntry = $modelList[$mi]
                 $mOem   = $mEntry.OEM
@@ -5401,8 +5400,12 @@ function Start-DATModelProcessing {
                 $mKey   = "$mOem|$mName"
                 if ($mi -ge $attemptedCount) {
                     $status = 'Not Processed'
-                } elseif ($failedKeys.ContainsKey($mKey) -and -not $skippedKeys.ContainsKey($mKey)) {
-                    $status = 'Failed'
+                } elseif ($failedKeys.ContainsKey($mKey)) {
+                    # Any package that failed makes the model a failure, even when another was
+                    # already current. Counting only models that THREW left the Failed fact
+                    # reading 0 beside a list of failed rows, on a green "completed successfully"
+                    # card -- a package that silently fails to build never throws.
+                    $status = 'Failed'; $failedModelCount++
                 } elseif ($skippedKeys.ContainsKey($mKey) -and -not $failedKeys.ContainsKey($mKey)) {
                     # Up to date only when every package type in scope was already current. Drivers
                     # current while BIOS updated leaves BIOS out of the skipped set, so that model is
@@ -5483,7 +5486,7 @@ function Start-DATModelProcessing {
 
             try {
                 Send-DATTeamsNotification -WebhookUrl $TeamsWebhookUrl `
-                    -TotalModels $totalModels -SuccessCount $completedCount -FailedCount $failedCount `
+                    -TotalModels $totalModels -SuccessCount $completedCount -FailedCount $failedModelCount `
                     -NotProcessedCount $notProcessedCount `
                     -UpdatedCount $updatedCount -SkippedCount $skippedModelCount -ModelStatuses $modelStatuses `
                     -CustomText $TeamsCustomText -FailureReason $failureSummary `
