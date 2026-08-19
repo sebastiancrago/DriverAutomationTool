@@ -5353,7 +5353,7 @@ function Start-DATModelProcessing {
             # card distinguishes genuinely UPDATED models from ones SKIPPED because already current
             # (a check-only run previously read as "everything updated" -- issue #842). A model that
             # produced at least one package (not in the skipped/failed sets, and reached) is Updated.
-            # Both lists hold one entry per package type, so the skipped set is kept per package type
+            # Both lists hold one entry per package type, so both sets are kept per package type
             # rather than flattened -- a model is only up to date when nothing in its scope was left
             # to build.
             $skippedKeys = @{}
@@ -5365,7 +5365,13 @@ function Start-DATModelProcessing {
                 }
             }
             $failedKeys  = @{}
-            foreach ($f in $buildFailures) { if ($f.OEM -and $f.Model) { $failedKeys["$($f.OEM)|$($f.Model)"]  = $true } }
+            foreach ($f in $buildFailures) {
+                if ($f.OEM -and $f.Model) {
+                    $fKey = "$($f.OEM)|$($f.Model)"
+                    if (-not $failedKeys.ContainsKey($fKey)) { $failedKeys[$fKey] = @{} }
+                    if ($f.PackageType) { $failedKeys[$fKey]["$($f.PackageType)"] = $true }
+                }
+            }
 
             # Package types in scope per model, mirroring the per-model narrowing applied during
             # processing. Microsoft Surface BIOS ships via driver injection, so no BIOS package is
@@ -5409,13 +5415,35 @@ function Start-DATModelProcessing {
                     } else {
                         $status = 'Updated'; $updatedCount++
                     }
-                } elseif ($failedKeys.ContainsKey($mKey) -and $skippedKeys.ContainsKey($mKey)) {
-                    # Mixed result across package types (e.g. drivers failed, BIOS current).
-                    $status = 'Partial'; $updatedCount++
                 } else {
                     $status = 'Updated'; $updatedCount++
                 }
-                $modelStatuses += @{ OEM = $mOem; Model = $mName; Status = $status }
+                # One row per package type in scope, always. A result reads the same way whatever
+                # the build did when the row names the package it belongs to, and a single row
+                # cannot say which package did what. A model the build never reached keeps one
+                # unlabelled row -- splitting it would only repeat 'Not Processed' per package.
+                $mRows = @()
+                if ($mi -lt $attemptedCount -and $scopeKeys.ContainsKey($mKey) -and $scopeKeys[$mKey].Count -gt 0) {
+                    $mFailedPkgs  = if ($failedKeys.ContainsKey($mKey))  { $failedKeys[$mKey] }  else { @{} }
+                    $mSkippedPkgs = if ($skippedKeys.ContainsKey($mKey)) { $skippedKeys[$mKey] } else { @{} }
+                    # Fixed order so the rows read in the order the packages are built.
+                    foreach ($mScoped in @('Drivers', 'BIOS')) {
+                        if (-not $scopeKeys[$mKey].ContainsKey($mScoped)) { continue }
+                        # Short 'Skipped' -- naming the package type already says which one is
+                        # current, so the fact set's longer label would only say it twice.
+                        $mPkgStatus = if ($mFailedPkgs.ContainsKey($mScoped)) { 'Failed' }
+                                      elseif ($mSkippedPkgs.ContainsKey($mScoped)) { 'Skipped' }
+                                      else { 'Updated' }
+                        $mRows += @{ OEM = $mOem; Model = $mName; Status = $mPkgStatus; PackageType = $mScoped }
+                    }
+                }
+                if ($mRows.Count -gt 0) {
+                    $modelStatuses += $mRows
+                } else {
+                    # Reached only by a model the build never got to, or one with no package type
+                    # in scope (Microsoft on a BIOS build).
+                    $modelStatuses += @{ OEM = $mOem; Model = $mName; Status = $status }
+                }
             }
 
             try {
@@ -5457,6 +5485,8 @@ function Send-DATTeamsNotification {
         [int]$UpdatedCount = -1,
         # Optional array of @{ OEM; Model; Status } (Status: Updated/Skipped/Failed/Not Processed).
         # When supplied the model list shows each outcome instead of a flat selected-models list.
+        # An entry may also carry PackageType (Drivers/BIOS) -- a model the build processed
+        # contributes one row per package type in scope; leaving it off keeps a single row.
         [array]$ModelStatuses = @()
     )
 
@@ -5528,7 +5558,10 @@ function Send-DATTeamsNotification {
         foreach ($ms in $ModelStatuses) {
             $msModel  = if ($ms.Model) { $ms.Model } else { "$($ms.OEM) Unknown" }
             $msStatus = if ($ms.Status) { $ms.Status } else { 'Processed' }
-            $modelFacts += @{ title = $ms.OEM; value = "$msModel -- $msStatus" }
+            # PackageType is set on every row for a model the build actually processed -- rows
+            # without it are models it never reached, carrying the model outcome on its own.
+            if ($ms.PackageType) { $msStatus = "$($ms.PackageType): $msStatus" }
+            $modelFacts += @{ title = $ms.OEM; value = "$msModel - $msStatus" }
         }
     } else {
         foreach ($m in $Models) {
