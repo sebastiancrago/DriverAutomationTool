@@ -4180,6 +4180,12 @@ function Start-DATModelProcessing {
     Remove-ItemProperty -Path $global:RegPath -Name 'BuildSkippedCurrent' -ErrorAction SilentlyContinue
     Set-DATRegistryValue -Name "SkippedPackages" -Value "0" -Type String
 
+    # Collect the version each package moved from and to, per model and package type, so the build
+    # notification can report what actually changed rather than only how many packages moved. Held
+    # in memory for the notification alone -- nothing is written to the registry and no existing
+    # counter, list or control flow depends on it.
+    $buildVersions = [System.Collections.Generic.List[object]]::new()
+
     foreach ($model in $modelList) {
         $currentIndex++
         $oem = $model.OEM
@@ -4190,6 +4196,17 @@ function Start-DATModelProcessing {
         $biosSuccessBefore = $biosPackageSuccessCount
         $modelFailReason = ''
         $thisBiosNoMatch = $false
+        # Per-model version tracking for the build notification. 'Updated' is the default because
+        # a package that neither failed nor matched the deployed version was genuinely rebuilt.
+        # The *Known flags record whether a deployed version was actually looked up: Download Only,
+        # WIM Package Only and offline builds never look, so an empty FromVersion there means
+        # "unknown", not "nothing was deployed" -- without this every package looks brand new.
+        $drvFromVersion = ''
+        $drvVersionOutcome = 'Updated'
+        $drvVersionKnown = $false
+        $biosFromVersion = ''
+        $biosVersionOutcome = 'Updated'
+        $biosVersionKnown = $false
 
         # Proactively refresh Intune token before each model to prevent expiry during long builds
         if ($RunningMode -eq 'Intune' -and -not [string]::IsNullOrEmpty($script:IntuneAuthToken)) {
@@ -4289,6 +4306,7 @@ function Start-DATModelProcessing {
                                 $cmDriverPkgName = $fallbackPkgName
                             }
                         }
+                        $drvFromVersion = "$existingCMVersion"; $drvVersionKnown = $true
                         if ([string]::IsNullOrEmpty($existingCMVersion)) {
                             Write-DATLogEntry -Value "[$currentIndex/$totalModels] No existing ConfigMgr package found matching: $cmDriverPkgName -- will download" -Severity 1
                         } elseif ($existingCMVersion -eq $catalogDriverVersion -and -not $modelForceUpdate) {
@@ -4300,6 +4318,7 @@ function Start-DATModelProcessing {
                             $buildSkipped.Add([pscustomobject]@{ OEM = $oem; Model = $modelName; PackageType = 'Drivers'; OS = "$os"; Reason = "Current (v$existingCMVersion)" })
                             Set-DATRegistryValue -Name "BuildSkippedCurrent" -Value ($buildSkipped | ConvertTo-Json -Compress -Depth 3) -Type String
                             Set-DATRegistryValue -Name "SkippedPackages" -Value "$($buildSkipped.Count)" -Type String
+                            $drvVersionOutcome = 'Skipped'
                         } elseif ($modelForceUpdate) {
                             Write-DATLogEntry -Value "[$currentIndex/$totalModels] FORCE UPDATE -- bypassing version match (existing v$existingCMVersion, catalog v${catalogDriverVersion}): $cmDriverPkgName" -Severity 1
                         } else {
@@ -4329,6 +4348,8 @@ function Start-DATModelProcessing {
                                 $expectedDisplayName = $fallbackDisplayName
                             }
                         }
+                        $drvVersionKnown = $true
+                        if ($existingIntuneApp) { $drvFromVersion = "$($existingIntuneApp.displayVersion)" }
                         if (-not $existingIntuneApp) {
                             Write-DATLogEntry -Value "[$currentIndex/$totalModels] No existing Intune app found matching: $expectedDisplayName -- will download" -Severity 1
                         } elseif ($existingIntuneApp.displayVersion -eq $catalogDriverVersion -and -not $modelForceUpdate) {
@@ -4340,6 +4361,7 @@ function Start-DATModelProcessing {
                             $buildSkipped.Add([pscustomobject]@{ OEM = $oem; Model = $modelName; PackageType = 'Drivers'; OS = "$os"; Reason = "Current (v$($existingIntuneApp.displayVersion))" })
                             Set-DATRegistryValue -Name "BuildSkippedCurrent" -Value ($buildSkipped | ConvertTo-Json -Compress -Depth 3) -Type String
                             Set-DATRegistryValue -Name "SkippedPackages" -Value "$($buildSkipped.Count)" -Type String
+                            $drvVersionOutcome = 'Skipped'
                         } elseif ($modelForceUpdate) {
                             Write-DATLogEntry -Value "[$currentIndex/$totalModels] FORCE UPDATE -- bypassing version match (Intune v$($existingIntuneApp.displayVersion), catalog v${catalogDriverVersion}): $expectedDisplayName" -Severity 1
                         } else {
@@ -4837,6 +4859,7 @@ function Start-DATModelProcessing {
                                     $cmBiosPkgName = $fallbackBiosPkgName
                                 }
                             }
+                            $biosFromVersion = "$existingCMBiosVer"; $biosVersionKnown = $true
                             if ([string]::IsNullOrEmpty($existingCMBiosVer)) {
                                 Write-DATLogEntry -Value "[$currentIndex/$totalModels] No existing ConfigMgr BIOS package found matching: $cmBiosPkgName -- will download" -Severity 1
                             } elseif ($existingCMBiosVer -eq $catalogBIOSVersion -and -not $modelForceUpdate) {
@@ -4847,6 +4870,7 @@ function Start-DATModelProcessing {
                                 $buildSkipped.Add([pscustomobject]@{ OEM = $oem; Model = $modelName; PackageType = 'BIOS'; OS = "$os"; Reason = "Current (v$existingCMBiosVer)" })
                                 Set-DATRegistryValue -Name "BuildSkippedCurrent" -Value ($buildSkipped | ConvertTo-Json -Compress -Depth 3) -Type String
                                 Set-DATRegistryValue -Name "SkippedPackages" -Value "$($buildSkipped.Count)" -Type String
+                                $biosVersionOutcome = 'Skipped'
                             } elseif ($modelForceUpdate) {
                                 Write-DATLogEntry -Value "[$currentIndex/$totalModels] BIOS FORCE UPDATE -- bypassing version match (existing v$existingCMBiosVer, catalog v${catalogBIOSVersion}): $cmBiosPkgName" -Severity 1
                             } else {
@@ -4873,6 +4897,8 @@ function Start-DATModelProcessing {
                                     $expectedBiosName = $fallbackBiosName
                                 }
                             }
+                            $biosVersionKnown = $true
+                            if ($existingBiosApp) { $biosFromVersion = "$($existingBiosApp.displayVersion)" }
                             if (-not $existingBiosApp) {
                                 Write-DATLogEntry -Value "[$currentIndex/$totalModels] No existing Intune BIOS app found matching: $expectedBiosName -- will download" -Severity 1
                             } elseif ($existingBiosApp.displayVersion -eq $catalogBIOSVersion -and -not $modelForceUpdate) {
@@ -4883,6 +4909,7 @@ function Start-DATModelProcessing {
                                 $buildSkipped.Add([pscustomobject]@{ OEM = $oem; Model = $modelName; PackageType = 'BIOS'; OS = "$os"; Reason = "Current (v$($existingBiosApp.displayVersion))" })
                                 Set-DATRegistryValue -Name "BuildSkippedCurrent" -Value ($buildSkipped | ConvertTo-Json -Compress -Depth 3) -Type String
                                 Set-DATRegistryValue -Name "SkippedPackages" -Value "$($buildSkipped.Count)" -Type String
+                                $biosVersionOutcome = 'Skipped'
                             } elseif ($modelForceUpdate) {
                                 Write-DATLogEntry -Value "[$currentIndex/$totalModels] BIOS FORCE UPDATE -- bypassing version match (Intune v$($existingBiosApp.displayVersion), catalog v${catalogBIOSVersion}): $expectedBiosName" -Severity 1
                             } else {
@@ -4893,8 +4920,12 @@ function Start-DATModelProcessing {
                         # Download Only / WIM Package Only -- check if BIOS package already exists with matching version
                         $existingBiosDir = Join-Path $PackagePath "$oem\$modelName\BIOS"
                         $existingBiosVersionFile = Join-Path $existingBiosDir ".biosversion"
+                        # The lookup happened whether or not a version file was there -- an absent
+                        # one means nothing is deployed, which is exactly what makes a package new.
+                        $biosVersionKnown = $true
                         if ((Test-Path $existingBiosDir) -and (Test-Path $existingBiosVersionFile)) {
                             $existingBiosVer = (Get-Content $existingBiosVersionFile -Raw -ErrorAction SilentlyContinue).Trim()
+                            $biosFromVersion = "$existingBiosVer"
                             if ($existingBiosVer -eq $catalogBIOSVersion -and -not $modelForceUpdate) {
                                 Write-DATLogEntry -Value "[$currentIndex/$totalModels] SKIPPED -- BIOS package already exists with current version ($existingBiosVer): $existingBiosDir" -Severity 1
                                 Set-DATRegistryValue -Name "RunningMessage" -Value "BIOS skipped (exists v$existingBiosVer): $oem $modelName" -Type String
@@ -4903,6 +4934,7 @@ function Start-DATModelProcessing {
                                 $buildSkipped.Add([pscustomobject]@{ OEM = $oem; Model = $modelName; PackageType = 'BIOS'; OS = "$os"; Reason = "Current (v$existingBiosVer)" })
                                 Set-DATRegistryValue -Name "BuildSkippedCurrent" -Value ($buildSkipped | ConvertTo-Json -Compress -Depth 3) -Type String
                                 Set-DATRegistryValue -Name "SkippedPackages" -Value "$($buildSkipped.Count)" -Type String
+                                $biosVersionOutcome = 'Skipped'
                             } else {
                                 Write-DATLogEntry -Value "[$currentIndex/$totalModels] BIOS UPDATE needed -- local v$existingBiosVer, catalog v${catalogBIOSVersion}: $oem $modelName" -Severity 1
                             }
@@ -5217,6 +5249,19 @@ function Start-DATModelProcessing {
                               else { 'BIOS package was not created -- see log for details' }
                 $buildFailures.Add([pscustomobject]@{ OEM = $oem; Model = $modelName; PackageType = 'BIOS'; OS = "$os"; Reason = $biosReason })
             }
+        }
+
+        # Record the version each package moved from and to for the build notification. Emitted
+        # here rather than at the version checks so a model contributes exactly one record per
+        # package type in scope whatever path it took through processing. Microsoft is left out
+        # of BIOS for the same reason as the failure record above.
+        if ($modelPackageType -in @('Drivers', 'All')) {
+            $drvOutcome = if ($driverPackageSuccessCount -le $drvSuccessBefore) { 'Failed' } else { $drvVersionOutcome }
+            $buildVersions.Add([pscustomobject]@{ OEM = $oem; Model = $modelName; PackageType = 'Drivers'; OS = "$os"; Outcome = $drvOutcome; FromVersion = "$drvFromVersion"; ToVersion = "$catalogDriverVersion"; DeployedKnown = $drvVersionKnown })
+        }
+        if ($modelPackageType -in @('BIOS', 'All') -and $oem -ne 'Microsoft') {
+            $biosOutcome = if ($biosPackageSuccessCount -le $biosSuccessBefore) { 'Failed' } else { $biosVersionOutcome }
+            $buildVersions.Add([pscustomobject]@{ OEM = $oem; Model = $modelName; PackageType = 'BIOS'; OS = "$os"; Outcome = $biosOutcome; FromVersion = "$biosFromVersion"; ToVersion = "$catalogBIOSVersion"; DeployedKnown = $biosVersionKnown })
         }
 
         Set-DATRegistryValue -Name "CompletedJobs" -Value "$completedCount" -Type String
