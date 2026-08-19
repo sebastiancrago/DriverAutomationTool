@@ -5576,15 +5576,19 @@ function Send-DATTeamsNotification {
         @{ title = 'Package Type'; value = $PackageType },
         @{ title = 'Total Models'; value = "$TotalModels" }
     )
+    # Only counts that actually happened. A zero row says nothing and pushes the ones that
+    # matter further down, so each is omitted when empty -- a check-only run shows Up to date
+    # alone, and a build with no failures never shows "Failed: 0".
     if ($UpdatedCount -ge 0) {
-        # Accurate breakdown: genuinely updated vs skipped-because-current.
-        $summaryFacts += @{ title = 'Updated'; value = "$UpdatedCount" }
+        if ($UpdatedCount -gt 0) { $summaryFacts += @{ title = 'Updated';    value = "$UpdatedCount" } }
         if ($SkippedCount -gt 0) { $summaryFacts += @{ title = 'Up to date'; value = "$SkippedCount" } }
-    } else {
+    } elseif ($SuccessCount -gt 0) {
         # Legacy callers: keep the original 'Succeeded' fact.
         $summaryFacts += @{ title = 'Succeeded'; value = "$SuccessCount" }
     }
-    $summaryFacts += @{ title = 'Failed'; value = "$FailedCount" }
+    if ($FailedCount -gt 0) {
+        $summaryFacts += @{ title = 'Failed'; value = "$FailedCount" }
+    }
     if ($NotProcessedCount -gt 0) {
         $summaryFacts += @{ title = 'Not Processed'; value = "$NotProcessedCount" }
     }
