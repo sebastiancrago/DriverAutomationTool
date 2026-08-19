@@ -4200,7 +4200,7 @@ function Start-DATModelProcessing {
         # a package that neither failed nor matched the deployed version was genuinely rebuilt.
         # The *Known flags record whether a deployed version was actually looked up: Download Only,
         # WIM Package Only and offline builds never look, so an empty FromVersion there means
-        # "unknown", not "nothing was deployed" -- without this every package looks brand new.
+        # "unknown", not "nothing was deployed" -- without this every package reads as new.
         $drvFromVersion = ''
         $drvVersionOutcome = 'Updated'
         $drvVersionKnown = $false
@@ -5436,7 +5436,6 @@ function Start-DATModelProcessing {
                 if ($mScopeType -in @('BIOS', 'All') -and $m.OEM -ne 'Microsoft') { $scopeKeys[$mScopeKey]['BIOS'] = $true }
             }
 
-
             # Index the version transitions recorded during processing so a row can say what a
             # package moved from and to. Keyed per package type -- a model on an 'All' build
             # contributes one record for each.
@@ -5448,7 +5447,7 @@ function Start-DATModelProcessing {
             }
 
             $modelStatuses = @()
-            $updatedCount = 0; $skippedModelCount = 0; $failedModelCount = 0
+            $updatedCount = 0; $skippedModelCount = 0; $failedModelCount = 0; $addedModelCount = 0
             for ($mi = 0; $mi -lt $modelList.Count; $mi++) {
                 $mEntry = $modelList[$mi]
                 $mOem   = $mEntry.OEM
@@ -5459,6 +5458,7 @@ function Start-DATModelProcessing {
                 # has a transition worth printing -- leaving them off also keeps a large check-only
                 # or failed build exactly the size it was.
                 $mVersions = @{}
+                $mNewPkgs = @{}
                 foreach ($mVerType in @('Drivers', 'BIOS')) {
                     $mVerRec = $versionKeys["$mKey|$mVerType"]
                     if (-not $mVerRec -or $mVerRec.Outcome -ne 'Updated') { continue }
@@ -5471,6 +5471,14 @@ function Start-DATModelProcessing {
                                 elseif ($mVerTo) { $mVerTo }
                                 else { $mVerFrom }
                     if ($mVerText) { $mVersions[$mVerType] = $mVerText }
+                    # Nothing on the deployed side means the package was created for the first
+                    # time rather than moved between versions -- but only when this platform
+                    # actually looked. Download Only, WIM and offline builds never resolve a
+                    # deployed driver version, so an empty side there means "unknown", and
+                    # calling it new would label every package Added on every run forever.
+                    # A ToVersion is required too: the Download Only "already downloaded today"
+                    # path records an update with neither side set, and that is not a new package.
+                    if ($mVerRec.DeployedKnown -and -not $mVerFrom -and $mVerTo) { $mNewPkgs[$mVerType] = $true }
                 }
                 if ($mi -ge $attemptedCount) {
                     $status = 'Not Processed'
@@ -5495,7 +5503,21 @@ function Start-DATModelProcessing {
                         $status = 'Updated'; $updatedCount++
                     }
                 } else {
-                    $status = 'Updated'; $updatedCount++
+                    # Added only when EVERY package in scope was created for the first time. One
+                    # new package beside one that moved versions is an update to the model, the
+                    # same way one current package beside one that moved is.
+                    $mAllNew = $false
+                    if ($scopeKeys.ContainsKey($mKey) -and $scopeKeys[$mKey].Count -gt 0) {
+                        $mAllNew = $true
+                        foreach ($mScoped in $scopeKeys[$mKey].Keys) {
+                            if (-not $mNewPkgs.ContainsKey($mScoped)) { $mAllNew = $false }
+                        }
+                    }
+                    if ($mAllNew) {
+                        $status = 'Added'; $addedModelCount++
+                    } else {
+                        $status = 'Updated'; $updatedCount++
+                    }
                 }
                 # One row per package type in scope, always. A result reads the same way whatever
                 # the build did when the row names the package it belongs to, and a single row
@@ -5512,6 +5534,7 @@ function Start-DATModelProcessing {
                         # do to it -- the row and the fact above it now read the same way.
                         $mPkgStatus = if ($mFailedPkgs.ContainsKey($mScoped)) { 'Failed' }
                                       elseif ($mSkippedPkgs.ContainsKey($mScoped)) { 'Up to date' }
+                                      elseif ($mNewPkgs.ContainsKey($mScoped)) { 'Added' }
                                       else { 'Updated' }
                         $mRows += @{ OEM = $mOem; Model = $mName; Status = $mPkgStatus; PackageType = $mScoped; Versions = $mVersions[$mScoped] }
                     }
@@ -5562,7 +5585,8 @@ function Start-DATModelProcessing {
                 Send-DATTeamsNotification -WebhookUrl $TeamsWebhookUrl `
                     -TotalModels $totalModels -SuccessCount $completedCount -FailedCount $failedModelCount `
                     -NotProcessedCount $notProcessedCount `
-                    -UpdatedCount $updatedCount -SkippedCount $skippedModelCount -ModelStatuses $modelStatuses `
+                    -AddedCount $addedModelCount -UpdatedCount $updatedCount -SkippedCount $skippedModelCount `
+                    -ModelStatuses $modelStatuses `
                     -CustomText $TeamsCustomText -FailureReason $failureSummary `
                     -Platform $RunningMode -PackageType $PackageType -Models $modelList -Outcome $buildOutcome
                 Write-DATLogEntry -Value "[Teams] Build notification sent successfully" -Severity 1
@@ -5595,7 +5619,10 @@ function Send-DATTeamsNotification {
         # Count of models genuinely updated (packages created). -1 keeps the legacy 'Succeeded'
         # fact (SuccessCount) for existing callers that don't supply this.
         [int]$UpdatedCount = -1,
-        # Optional array of @{ OEM; Model; Status } (Status: Updated/Up to date/Failed/Not
+        # Count of models whose every package was created for the first time. Shown as its own
+        # fact so a first build is not reported as having updated packages that never existed.
+        [int]$AddedCount = 0,
+        # Optional array of @{ OEM; Model; Status } (Status: Added/Updated/Up to date/Failed/Not
         # Processed). When supplied the model list shows each outcome instead of a flat model list.
         # An entry may also carry PackageType (Drivers/BIOS) -- a model the build processed
         # contributes one row per package type in scope; leaving it off keeps a single row.
@@ -5653,11 +5680,12 @@ function Send-DATTeamsNotification {
         @{ title = 'Total Models'; value = "$TotalModels" }
     )
     # Only counts that actually happened. A zero row says nothing and pushes the ones that
-    # matter further down, so each is omitted when empty -- a check-only run shows Up to date
-    # alone, and a build with no failures never shows "Failed: 0".
+    # matter further down, so each is omitted when empty -- a first build shows Added alone,
+    # a check-only run shows Up to date alone.
     if ($UpdatedCount -ge 0) {
-        if ($UpdatedCount -gt 0) { $summaryFacts += @{ title = 'Updated';    value = "$UpdatedCount" } }
-        if ($SkippedCount -gt 0) { $summaryFacts += @{ title = 'Up to date'; value = "$SkippedCount" } }
+        if ($AddedCount -gt 0)   { $summaryFacts += @{ title = 'Added';       value = "$AddedCount" } }
+        if ($UpdatedCount -gt 0) { $summaryFacts += @{ title = 'Updated';     value = "$UpdatedCount" } }
+        if ($SkippedCount -gt 0) { $summaryFacts += @{ title = 'Up to date';  value = "$SkippedCount" } }
     } elseif ($SuccessCount -gt 0) {
         # Legacy callers: keep the original 'Succeeded' fact.
         $summaryFacts += @{ title = 'Succeeded'; value = "$SuccessCount" }
