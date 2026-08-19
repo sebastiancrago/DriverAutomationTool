@@ -5409,14 +5409,14 @@ function Start-DATModelProcessing {
                 } elseif ($skippedKeys.ContainsKey($mKey) -and -not $failedKeys.ContainsKey($mKey)) {
                     # Up to date only when every package type in scope was already current. Drivers
                     # current while BIOS updated leaves BIOS out of the skipped set, so that model is
-                    # genuinely Updated -- flattening the key reported it as "Skipped (up to date)"
-                    # and hid the BIOS update entirely.
+                    # genuinely Updated -- flattening the key reported it as up to date and hid
+                    # the BIOS update entirely.
                     $mSkippedAll = $true
                     foreach ($mScoped in $scopeKeys[$mKey].Keys) {
                         if (-not $skippedKeys[$mKey].ContainsKey($mScoped)) { $mSkippedAll = $false }
                     }
                     if ($mSkippedAll) {
-                        $status = 'Skipped (up to date)'; $skippedModelCount++
+                        $status = 'Up to date'; $skippedModelCount++
                     } else {
                         $status = 'Updated'; $updatedCount++
                     }
@@ -5434,10 +5434,10 @@ function Start-DATModelProcessing {
                     # Fixed order so the rows read in the order the packages are built.
                     foreach ($mScoped in @('Drivers', 'BIOS')) {
                         if (-not $scopeKeys[$mKey].ContainsKey($mScoped)) { continue }
-                        # Short 'Skipped' -- naming the package type already says which one is
-                        # current, so the fact set's longer label would only say it twice.
+                        # 'Up to date' says what the package IS, not what the build declined to
+                        # do to it -- the row and the fact above it now read the same way.
                         $mPkgStatus = if ($mFailedPkgs.ContainsKey($mScoped)) { 'Failed' }
-                                      elseif ($mSkippedPkgs.ContainsKey($mScoped)) { 'Skipped' }
+                                      elseif ($mSkippedPkgs.ContainsKey($mScoped)) { 'Up to date' }
                                       else { 'Updated' }
                         $mRows += @{ OEM = $mOem; Model = $mName; Status = $mPkgStatus; PackageType = $mScoped }
                     }
@@ -5521,8 +5521,8 @@ function Send-DATTeamsNotification {
         # Count of models genuinely updated (packages created). -1 keeps the legacy 'Succeeded'
         # fact (SuccessCount) for existing callers that don't supply this.
         [int]$UpdatedCount = -1,
-        # Optional array of @{ OEM; Model; Status } (Status: Updated/Skipped/Failed/Not Processed).
-        # When supplied the model list shows each outcome instead of a flat selected-models list.
+        # Optional array of @{ OEM; Model; Status } (Status: Updated/Up to date/Failed/Not
+        # Processed). When supplied the model list shows each outcome instead of a flat model list.
         # An entry may also carry PackageType (Drivers/BIOS) -- a model the build processed
         # contributes one row per package type in scope; leaving it off keeps a single row.
         [array]$ModelStatuses = @(),
@@ -5579,7 +5579,7 @@ function Send-DATTeamsNotification {
     if ($UpdatedCount -ge 0) {
         # Accurate breakdown: genuinely updated vs skipped-because-current.
         $summaryFacts += @{ title = 'Updated'; value = "$UpdatedCount" }
-        if ($SkippedCount -gt 0) { $summaryFacts += @{ title = 'Skipped (up to date)'; value = "$SkippedCount" } }
+        if ($SkippedCount -gt 0) { $summaryFacts += @{ title = 'Up to date'; value = "$SkippedCount" } }
     } else {
         # Legacy callers: keep the original 'Succeeded' fact.
         $summaryFacts += @{ title = 'Succeeded'; value = "$SuccessCount" }
