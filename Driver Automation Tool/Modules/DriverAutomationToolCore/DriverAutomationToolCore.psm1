@@ -5369,7 +5369,9 @@ function Start-DATModelProcessing {
                 if ($f.OEM -and $f.Model) {
                     $fKey = "$($f.OEM)|$($f.Model)"
                     if (-not $failedKeys.ContainsKey($fKey)) { $failedKeys[$fKey] = @{} }
-                    if ($f.PackageType) { $failedKeys[$fKey]["$($f.PackageType)"] = $true }
+                    # Keep the reason against the package type -- only the key is tested below, but
+                    # the card rolls the reasons up so a failed build says why, not just how many.
+                    if ($f.PackageType) { $failedKeys[$fKey]["$($f.PackageType)"] = $f.Reason }
                 }
             }
 
@@ -5446,12 +5448,45 @@ function Start-DATModelProcessing {
                 }
             }
 
+            # Roll the failure reasons already recorded for the "View Failures" report onto the
+            # card, grouped per reason rather than placed on each row: a build that dies on bad
+            # credentials or an unreachable share repeats one reason for every model, and per-row
+            # reasons push that card past the webhook payload limit -- the card that most needs to
+            # arrive. A model that failed every package type for the same reason counts once.
+            $reasonModels = @{}
+            foreach ($rKey in $failedKeys.Keys) {
+                foreach ($rReason in $failedKeys[$rKey].Values) {
+                    if ([string]::IsNullOrWhiteSpace($rReason)) { continue }
+                    if (-not $reasonModels.ContainsKey($rReason)) { $reasonModels[$rReason] = @{} }
+                    $reasonModels[$rReason][$rKey] = $true
+                }
+            }
+            $failureSummary = ''
+            if ($reasonModels.Count -gt 0) {
+                # Most models first, and only the top three -- with an exception message unbounded
+                # in length, capping both keeps the fact readable and its cost constant.
+                $rRanked = @($reasonModels.GetEnumerator() |
+                    Sort-Object -Property @{ Expression = { $_.Value.Count }; Descending = $true }, Key)
+                $rParts = @()
+                foreach ($rEntry in ($rRanked | Select-Object -First 3)) {
+                    $rText = [string]$rEntry.Key
+                    if ($rText.Length -gt 100) { $rText = $rText.Substring(0, 100).TrimEnd() + '...' }
+                    $rCount = $rEntry.Value.Count
+                    $rParts += "$rText ($rCount model$(if ($rCount -ne 1) { 's' }))"
+                }
+                if ($rRanked.Count -gt 3) {
+                    $rOther = $rRanked.Count - 3
+                    $rParts += "and $rOther other reason$(if ($rOther -ne 1) { 's' })"
+                }
+                $failureSummary = $rParts -join '; '
+            }
+
             try {
                 Send-DATTeamsNotification -WebhookUrl $TeamsWebhookUrl `
                     -TotalModels $totalModels -SuccessCount $completedCount -FailedCount $failedCount `
                     -NotProcessedCount $notProcessedCount `
                     -UpdatedCount $updatedCount -SkippedCount $skippedModelCount -ModelStatuses $modelStatuses `
-                    -CustomText $TeamsCustomText `
+                    -CustomText $TeamsCustomText -FailureReason $failureSummary `
                     -Platform $RunningMode -PackageType $PackageType -Models $modelList -Outcome $buildOutcome
                 Write-DATLogEntry -Value "[Teams] Build notification sent successfully" -Severity 1
             } catch {
